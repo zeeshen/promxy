@@ -4,6 +4,8 @@ go 1.13
 
 require (
 	cloud.google.com/go v0.39.0 // indirect
+	contrib.go.opencensus.io/exporter/ocagent v0.4.12
+	git.llsapp.com/hunter/oc-wrapper v0.0.0-20181218060233-8fb11a783b9c
 	github.com/Azure/azure-sdk-for-go v30.0.0+incompatible // indirect
 	github.com/Azure/go-autorest v11.2.8+incompatible
 	github.com/armon/go-metrics v0.0.0-20190430140413-ec5e00d3c878 // indirect
@@ -35,6 +37,7 @@ require (
 	github.com/shurcooL/vfsgen v0.0.0-20181202132449-6a9ea43bcacd // indirect
 	github.com/sirupsen/logrus v1.4.3-0.20190518135202-2a22dbedbad1
 	github.com/stretchr/testify v1.3.0
+	go.opencensus.io v0.21.0
 	golang.org/x/sys v0.0.0-20190606203320-7fc4e5ec1444 // indirect
 	golang.org/x/time v0.0.0-20190308202827-9d24e82272b4
 	google.golang.org/api v0.6.0 // indirect

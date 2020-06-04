@@ -2,6 +2,10 @@ package servergroup
 
 import (
 	"context"
+	"git.llsapp.com/hunter/oc-wrapper/defines"
+	"git.llsapp.com/hunter/oc-wrapper/env"
+	"go.opencensus.io/plugin/ochttp"
+	"go.opencensus.io/trace"
 	"net"
 	"net/http"
 	"net/url"
@@ -270,7 +274,7 @@ func (s *ServerGroup) ApplyConfig(cfg *Config) error {
 		rt = config_util.NewBasicAuthRoundTripper(cfg.HTTPConfig.HTTPConfig.BasicAuth.Username, cfg.HTTPConfig.HTTPConfig.BasicAuth.Password, cfg.HTTPConfig.HTTPConfig.BasicAuth.PasswordFile, rt)
 	}
 
-	s.Client = &http.Client{Transport: rt}
+	s.Client = &http.Client{Transport: newOCHTTPTransport(rt)}
 
 	if err := s.targetManager.ApplyConfig(map[string]sd_config.ServiceDiscoveryConfig{"foo": cfg.Hosts}); err != nil {
 		return err
@@ -315,4 +319,28 @@ func (s *ServerGroup) LabelNames(ctx context.Context) ([]string, api.Warnings, e
 // Series finds series by label matchers.
 func (s *ServerGroup) Series(ctx context.Context, matches []string, startTime, endTime time.Time) ([]model.LabelSet, api.Warnings, error) {
 	return s.State().apiClient.Series(ctx, matches, startTime, endTime)
+}
+
+type spanAnnotator struct{ rt http.RoundTripper }
+
+func (s *spanAnnotator) RoundTrip(req *http.Request) (*http.Response, error) {
+	if span := trace.FromContext(req.Context()); span != nil {
+		span.AddAttributes(
+			trace.StringAttribute(defines.SERVICE_NAME, env.GetServiceName()),
+			trace.StringAttribute(defines.SERVICE_REMOTE_KIND, defines.SERVICE_KIND_HTTP),
+			trace.StringAttribute(defines.SERVICE_HOST_NAME, env.GetHostName()),
+			trace.StringAttribute(defines.SERVICE_REMOTE_ADDR, req.Host),
+		)
+	}
+	return s.rt.RoundTrip(req)
+}
+
+func newOCHTTPTransport(base http.RoundTripper) http.RoundTripper {
+	rt := &ochttp.Transport{
+		Base: base,
+		GetStartOptions: func(req *http.Request) trace.StartOptions {
+			return trace.StartOptions{SpanKind: trace.SpanKindClient}
+		},
+	}
+	return &spanAnnotator{rt: rt}
 }

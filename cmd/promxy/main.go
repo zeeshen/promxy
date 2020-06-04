@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"go.opencensus.io/zpages"
 	"io"
 	"path"
+
+	"contrib.go.opencensus.io/exporter/ocagent"
+	"go.opencensus.io/trace"
 
 	"k8s.io/klog"
 
@@ -46,6 +50,7 @@ import (
 	"github.com/prometheus/prometheus/web"
 	"github.com/sirupsen/logrus"
 
+	ocwrapper_http "git.llsapp.com/hunter/oc-wrapper/http"
 	proxyconfig "github.com/jacksontj/promxy/pkg/config"
 	"github.com/jacksontj/promxy/pkg/logging"
 	"github.com/jacksontj/promxy/pkg/noop"
@@ -86,6 +91,11 @@ type cliOpts struct {
 
 	ShutdownDelay   time.Duration `long:"http.shutdown-delay" description:"time to wait before shutting down the http server, this allows for a grace period for upstreams (e.g. LoadBalancers) to discover the new stopping status through healthchecks" default:"10s"`
 	ShutdownTimeout time.Duration `long:"http.shutdown-timeout" description:"max time to wait for a graceful shutdown of the HTTP server" default:"60s"`
+
+	OCExporterEnabled  bool   `long:"oc.exporter-enabled" description:"Enable the opencensus exporter or not"`
+	OCExporterAddr     string `long:"oc.exporter-addr" description:"The address that the opencensus exporter will connect to the agent on"`
+	OCExporterName     string `long:"oc.exporter-name" description:"The service name that the opencensus exporter will report to the agent" default:"promxy"`
+	OCExporterInsecure bool   `long:"oc.exporter-insecure" description:"Allow the insecure gRPC communication between the opencensus exporter and agent"`
 }
 
 func (c *cliOpts) ToFlags() map[string]string {
@@ -171,6 +181,29 @@ func main() {
 	// Create base context for this daemon
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Setup opencensus exporter
+	var ocExporter *ocagent.Exporter
+	if opts.OCExporterEnabled {
+		if len(opts.OCExporterAddr) == 0 {
+			opts.OCExporterAddr = defaultOCExporterAddr()
+		}
+		options := []ocagent.ExporterOption{
+			ocagent.WithAddress(opts.OCExporterAddr),
+			ocagent.WithServiceName(opts.OCExporterName),
+		}
+		if opts.OCExporterInsecure {
+			options = append(options, ocagent.WithInsecure())
+		}
+		var err error
+		ocExporter, err = ocagent.NewExporter(options...)
+		if err != nil {
+			logrus.Fatalf("Error creating ocagent exporter: %v", err)
+		}
+		trace.RegisterExporter(ocExporter)
+		trace.ApplyConfig(trace.Config{DefaultSampler: trace.AlwaysSample()})
+		logrus.Debugf("OC agent started, addr=%s", opts.OCExporterAddr)
+	}
 
 	// Reload ready -- channel to close once we are ready to start reloaders
 	reloadReady := make(chan struct{})
@@ -341,6 +374,7 @@ func main() {
 
 	// TODO: configurable metrics path
 	r.HandlerFunc("GET", "/metrics", promhttp.Handler().ServeHTTP)
+	zpages.Handle(http.DefaultServeMux, "/debug")
 
 	stopping := false
 	r.NotFound = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -380,11 +414,12 @@ func main() {
 		logrus.Fatalf("Invalid AccessLogDestination: %s", opts.AccessLogDestination)
 	}
 
-	var handler http.Handler
-	if accessLogOut == nil {
-		handler = r
-	} else {
-		handler = logging.NewApacheLoggingHandler(r, logging.LogToWriter(accessLogOut))
+	var handler http.Handler = r
+	if opts.OCExporterEnabled {
+		handler = ocwrapper_http.TracedHandler(r)
+	}
+	if accessLogOut != nil {
+		handler = logging.NewApacheLoggingHandler(handler, logging.LogToWriter(accessLogOut))
 	}
 
 	srv := &http.Server{
@@ -428,6 +463,12 @@ func main() {
 				stopping = true        // start failing healthchecks
 				notifierManager.Stop() // stop alert notifier
 				ruleManager.Stop()     // Stop rule manager
+
+				if ocExporter != nil {
+					if err := ocExporter.Stop(); err != nil {
+						logrus.Warnf("Error stoping opencensus exporter: %v", err)
+					}
+				}
 
 				if opts.ShutdownDelay > 0 {
 					log.Infof("promxy delaying shutdown by %v", opts.ShutdownDelay)
@@ -514,4 +555,15 @@ func computeExternalURL(u, listenAddr string) (*url.URL, error) {
 	eu.Path = ppref
 
 	return eu, nil
+}
+
+func defaultOCExporterAddr() string {
+	const DefaultAgentHost string = "localhost"
+	const DefaultAgentPort uint16 = 55678
+
+	hostIp := os.Getenv("HOST_IP")
+	if hostIp == "" {
+		hostIp = DefaultAgentHost
+	}
+	return fmt.Sprintf("%s:%d", hostIp, DefaultAgentPort)
 }
